@@ -15,11 +15,11 @@ import android.location.Location
 import android.location.LocationManager
 import android.media.Ringtone
 import android.media.RingtoneManager
-import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.telephony.SubscriptionManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
@@ -41,11 +41,33 @@ class ForegroundSensorService : Service(), SensorEventListener {
         private const val NOTIFICATION_ID = 1
 
         private const val WINDOW_SIZE = 100
+        // Slide the window by 50 samples (~1 s at 50 Hz) so we get overlapping
+        // inferences instead of dropping context after every prediction.
+        private const val WINDOW_STRIDE = 50
         private const val HIGH_RATE = SensorManager.SENSOR_DELAY_GAME
         private const val LOW_RATE = SensorManager.SENSOR_DELAY_NORMAL
 
-        private const val FALL_CONFIDENCE_THRESHOLD = 0.8f
+        // Raised from 0.80 -> 0.92. The model output is one of two gates;
+        // physics validation is the other, so we can afford strict ML
+        // confidence without missing real falls.
+        private const val FALL_CONFIDENCE_THRESHOLD = 0.92f
+
+        // Two high-confidence inferences within this window count toward
+        // ML confirmation. Keeps spurious single-window spikes from
+        // triggering an alert on their own.
+        private const val ML_CONFIRM_WINDOW_MS = 2_500L
+
+        // Require an impact peak in the raw accelerometer data before even
+        // running the model. Matches FallValidator.IMPACT_THRESHOLD.
+        private const val PRE_INFERENCE_IMPACT_GATE = FallValidator.IMPACT_THRESHOLD
+
+        // How long to watch for post-impact stillness before deciding.
+        private const val POST_IMPACT_OBSERVATION_MS = 2_500L
+
         private const val ALERT_DELAY_MS = 15_000L
+        // Raised from 60 s to 3 min. If a false positive slips through, we
+        // do not want it re-firing minutes later.
+        private const val ALERT_COOLDOWN_MS = 180_000L
 
         private const val STATE_LOW = 0
         private const val STATE_HIGH = 1
@@ -59,6 +81,7 @@ class ForegroundSensorService : Service(), SensorEventListener {
     private lateinit var tfliteRunner: TFLiteRunner
     private lateinit var wakeDetector: WakeDetector
     private lateinit var metricsLogger: MetricsLogger
+    private lateinit var fallValidator: FallValidator
 
     private lateinit var locationManager: LocationManager
 
@@ -67,6 +90,7 @@ class ForegroundSensorService : Service(), SensorEventListener {
     private var alertRunnable: Runnable? = null
     private var currentAlertIsTest = false
     private var alertRingtone: Ringtone? = null
+    private var lastAlertTriggerAtMs = 0L
 
     private var adaptiveMode = false
     private var currentSamplingRate = HIGH_RATE
@@ -76,8 +100,15 @@ class ForegroundSensorService : Service(), SensorEventListener {
     private var highStateStartTime = 0L
     private var calmStartTime = 0L
 
-    private val MIN_HIGH_DURATION = 3000L
-    private val CALM_DURATION_REQUIRED = 2000L
+    private val MIN_HIGH_DURATION = 8000L
+    private val CALM_DURATION_REQUIRED = 3000L
+
+    // Two-phase verification state.
+    private var lastHighConfidenceAtMs = 0L
+    private var postImpactWatchUntilMs = 0L
+    private var postImpactMagnitudes = ArrayList<Float>()
+    private var awaitingPostImpactConfirmation = false
+    private var pendingConfidence = 0f
 
     override fun onCreate() {
         super.onCreate()
@@ -92,6 +123,7 @@ class ForegroundSensorService : Service(), SensorEventListener {
         tfliteRunner = TFLiteRunner(this)
         wakeDetector = WakeDetector()
         metricsLogger = MetricsLogger(this)
+        fallValidator = FallValidator()
 
         createNotificationChannel()
     }
@@ -121,6 +153,7 @@ class ForegroundSensorService : Service(), SensorEventListener {
 
         currentState = STATE_LOW
         calmStartTime = 0L
+        resetVerificationState()
 
         currentSamplingRate = if (adaptiveMode) LOW_RATE else HIGH_RATE
 
@@ -163,8 +196,23 @@ class ForegroundSensorService : Service(), SensorEventListener {
                 sensorBuffer.addAccelerometer(event.values.clone())
                 metricsLogger.logAccelerometer()
 
+                val magnitude = sqrt(
+                    event.values[0] * event.values[0] +
+                            event.values[1] * event.values[1] +
+                            event.values[2] * event.values[2]
+                )
+
                 if (adaptiveMode) {
-                    handleAdaptiveLogic(event.values)
+                    handleAdaptiveLogic(magnitude)
+                }
+
+                // While we are watching for post-impact stillness, collect the
+                // accelerometer magnitudes that arrive after the detected impact.
+                if (awaitingPostImpactConfirmation) {
+                    postImpactMagnitudes.add(magnitude)
+                    if (System.currentTimeMillis() >= postImpactWatchUntilMs) {
+                        evaluatePostImpactStillness()
+                    }
                 }
             }
 
@@ -175,29 +223,114 @@ class ForegroundSensorService : Service(), SensorEventListener {
         }
 
         if (sensorBuffer.isFull()) {
-
-            val input: FloatArray = sensorBuffer.getFlattenedWindow()
-            val confidence = tfliteRunner.runInference(input)
-
-            metricsLogger.logInference()
-
-            Log.d("INFERENCE", "Confidence: $confidence")
-
-            if (confidence >= FALL_CONFIDENCE_THRESHOLD) {
-                onPossibleFallDetected(confidence)
-            }
-
-            sensorBuffer.clear()
+            analyzeCurrentWindow()
+            // Slide instead of clear so we keep context across windows and
+            // still get a fresh inference roughly every WINDOW_STRIDE samples.
+            sensorBuffer.advance(WINDOW_STRIDE)
         }
     }
 
+    private fun analyzeCurrentWindow() {
+        // Cheap gate #1: don't bother the model if the window never saw a
+        // plausible impact. Filters out the vast majority of daily motion.
+        val peakMag = sensorBuffer.peakAccelMagnitude()
+        if (peakMag < PRE_INFERENCE_IMPACT_GATE) {
+            return
+        }
+
+        val input: FloatArray = sensorBuffer.getFlattenedWindow()
+
+        // Gate #2: physics validation on the raw window. Requires both an
+        // impact peak and a preceding free-fall dip.
+        val magnitudes = fallValidator.computeMagnitudes(input, WINDOW_SIZE)
+        val impactIdx = fallValidator.findImpactIndex(magnitudes)
+        if (impactIdx < 0) return
+        if (!fallValidator.hasFreeFallBeforeImpact(magnitudes, impactIdx)) {
+            Log.d("INFERENCE", "Impact without free-fall precursor; skipping")
+            return
+        }
+
+        // Gate #3: ML model.
+        val confidence = tfliteRunner.runInference(input)
+        metricsLogger.logInference()
+        Log.d("INFERENCE", "Confidence=$confidence peak=$peakMag")
+
+        if (confidence < FALL_CONFIDENCE_THRESHOLD) {
+            return
+        }
+
+        // Gate #4: require two high-confidence hits close together OR one
+        // high-confidence hit followed by post-impact stillness. We always
+        // proceed to the stillness watch, but if we already saw a recent
+        // high-confidence window we fast-track the stillness requirement.
+        val now = System.currentTimeMillis()
+        val recentMlHit = lastHighConfidenceAtMs > 0L &&
+                now - lastHighConfidenceAtMs <= ML_CONFIRM_WINDOW_MS
+        lastHighConfidenceAtMs = now
+
+        if (awaitingPostImpactConfirmation) {
+            // Already watching for stillness from an earlier impact in this
+            // event. Keep the higher confidence value.
+            if (confidence > pendingConfidence) pendingConfidence = confidence
+            return
+        }
+
+        beginPostImpactWatch(confidence, fastTrack = recentMlHit)
+    }
+
+    private fun beginPostImpactWatch(confidence: Float, fastTrack: Boolean) {
+        awaitingPostImpactConfirmation = true
+        pendingConfidence = confidence
+        postImpactMagnitudes.clear()
+        postImpactWatchUntilMs = System.currentTimeMillis() +
+                if (fastTrack) POST_IMPACT_OBSERVATION_MS / 2 else POST_IMPACT_OBSERVATION_MS
+
+        Log.d(
+            "INFERENCE",
+            "Starting post-impact stillness watch (fastTrack=$fastTrack, confidence=$confidence)"
+        )
+    }
+
+    private fun evaluatePostImpactStillness() {
+        val still = fallValidator.isPostImpactStill(postImpactMagnitudes)
+        val confidence = pendingConfidence
+        val samples = postImpactMagnitudes.size
+
+        resetVerificationState()
+
+        if (still) {
+            Log.d("INFERENCE", "Post-impact stillness confirmed (samples=$samples) -> ALERT")
+            onPossibleFallDetected(confidence)
+        } else {
+            Log.d(
+                "INFERENCE",
+                "Post-impact motion detected (samples=$samples) -> no alert, likely not a fall"
+            )
+        }
+    }
+
+    private fun resetVerificationState() {
+        awaitingPostImpactConfirmation = false
+        postImpactWatchUntilMs = 0L
+        postImpactMagnitudes.clear()
+        pendingConfidence = 0f
+    }
+
     private fun onPossibleFallDetected(confidence: Float, isTest: Boolean = false) {
+        val now = System.currentTimeMillis()
+
+        if (lastAlertTriggerAtMs > 0L && now - lastAlertTriggerAtMs < ALERT_COOLDOWN_MS) {
+            Log.d("ALERT", "Ignored alert during cooldown window")
+            return
+        }
+
         if (alertPending) {
             // Already counting down for an alert, avoid stacking
             return
         }
 
         alertPending = true
+        lastAlertTriggerAtMs = now
         currentAlertIsTest = isTest
 
         // Explicit buzz + beep when alert window starts
@@ -311,8 +444,9 @@ class ForegroundSensorService : Service(), SensorEventListener {
         val userPhone = prefs.getString("user_phone", "") ?: ""
         val caretakerName = prefs.getString("caretaker_name", "Caretaker") ?: "Caretaker"
         val caretakerPhone = prefs.getString("caretaker_phone", "") ?: ""
+        val normalizedCaretakerPhone = normalizePhoneNumber(caretakerPhone)
 
-        if (caretakerPhone.isEmpty()) {
+        if (normalizedCaretakerPhone.isEmpty()) {
             Log.w("ALERT", "Caretaker phone not configured, cannot send alert")
             return
         }
@@ -333,23 +467,67 @@ class ForegroundSensorService : Service(), SensorEventListener {
             ""
         }
 
-        val message = buildString {
-            append("Fall detected for $userName. ")
-            append("Please check on them immediately.\n")
-            append("Caretaker: $caretakerName.\n")
-            if (userPhonePart.isNotEmpty()) {
-                append("$userPhonePart\n")
+        val message = if (isTest) {
+            // Keep test SMS short so it stays as one segment on most carriers.
+            buildString {
+                append("TEST ALERT: FallDetectApp check for $userName. ")
+                append(locationPart)
             }
-            append(locationPart)
+        } else {
+            buildString {
+                append("Fall detected for $userName. ")
+                append("Please check on them immediately.\n")
+                append("Caretaker: $caretakerName.\n")
+                if (userPhonePart.isNotEmpty()) {
+                    append("$userPhonePart\n")
+                }
+                append(locationPart)
+            }
         }
 
         try {
-            val smsManager = SmsManager.getDefault()
-            smsManager.sendTextMessage(caretakerPhone, null, message, null, null)
-            Log.d("ALERT", "Alert SMS sent to $caretakerPhone (isTest=$isTest)")
+            val defaultSmsSubId = SubscriptionManager.getDefaultSmsSubscriptionId()
+            val smsManager = if (defaultSmsSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                SmsManager.getSmsManagerForSubscriptionId(defaultSmsSubId)
+            } else {
+                SmsManager.getDefault()
+            }
+
+            val messageParts = smsManager.divideMessage(message)
+            if (messageParts.size > 1) {
+                smsManager.sendMultipartTextMessage(
+                    normalizedCaretakerPhone,
+                    null,
+                    ArrayList(messageParts),
+                    null,
+                    null
+                )
+            } else {
+                smsManager.sendTextMessage(
+                    normalizedCaretakerPhone,
+                    null,
+                    message,
+                    null,
+                    null
+                )
+            }
+            Log.d(
+                "ALERT",
+                "Alert SMS sent to $normalizedCaretakerPhone (isTest=$isTest, parts=${messageParts.size})"
+            )
         } catch (e: Exception) {
             Log.e("ALERT", "Failed to send SMS", e)
         }
+    }
+
+    private fun normalizePhoneNumber(rawNumber: String): String {
+        if (rawNumber.isBlank()) return ""
+
+        val trimmed = rawNumber.trim()
+        val hasLeadingPlus = trimmed.startsWith("+")
+        val digits = trimmed.filter { it.isDigit() }
+
+        return if (hasLeadingPlus) "+$digits" else digits
     }
 
     private fun stopAlertSound() {
@@ -362,13 +540,7 @@ class ForegroundSensorService : Service(), SensorEventListener {
         }
     }
 
-    private fun handleAdaptiveLogic(values: FloatArray) {
-
-        val magnitude = sqrt(
-            values[0] * values[0] +
-                    values[1] * values[1] +
-                    values[2] * values[2]
-        )
+    private fun handleAdaptiveLogic(magnitude: Float) {
 
         val now = System.currentTimeMillis()
 
@@ -382,6 +554,11 @@ class ForegroundSensorService : Service(), SensorEventListener {
                     highStateStartTime = now
 
                     unregisterSensors()
+                    // Keep existing buffer data: the free-fall dip that
+                    // triggered the wake lives in those low-rate samples and
+                    // is needed by FallValidator. Only reset verification
+                    // state (not the buffer) so we don't lose evidence.
+                    resetVerificationState()
                     registerSensors(HIGH_RATE)
 
                     currentSamplingRate = HIGH_RATE
@@ -391,6 +568,13 @@ class ForegroundSensorService : Service(), SensorEventListener {
             }
 
             STATE_HIGH -> {
+
+                // Never drop to LOW while a post-impact stillness watch is
+                // running — that would kill the data stream we need to confirm.
+                if (awaitingPostImpactConfirmation) {
+                    calmStartTime = 0L
+                    return
+                }
 
                 val timeInHigh = now - highStateStartTime
 
@@ -410,6 +594,8 @@ class ForegroundSensorService : Service(), SensorEventListener {
                             calmStartTime = 0L
 
                             unregisterSensors()
+                            sensorBuffer.clear()
+                            resetVerificationState()
                             registerSensors(LOW_RATE)
 
                             currentSamplingRate = LOW_RATE
