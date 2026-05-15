@@ -2,6 +2,11 @@
 
 An Android app that detects falls using on-device ML inference and phone sensors, then sends an SMS alert with location to a configured caretaker.
 
+## Download
+
+- **Google Play Store:** _Coming soon — link will be added once the listing goes live._
+- **GitHub Release:** [SafeMotion v1.0](../../releases/tag/v1.0) — download the APK directly from the latest release.
+
 ## How It Works
 
 The app runs a foreground service that continuously monitors accelerometer and gyroscope data. When a potential fall is detected, it goes through a **4-gate validation pipeline** to eliminate false positives:
