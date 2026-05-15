@@ -1,4 +1,4 @@
-# FallDetectApp
+# SafeMotion
 
 An Android app that detects falls using on-device ML inference and phone sensors, then sends an SMS alert with location to a configured caretaker.
 
