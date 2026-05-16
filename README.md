@@ -2,7 +2,7 @@
 
 An Android app that detects falls using on-device ML inference and phone sensors, then sends an SMS alert with location to a configured caretaker.
 
-The TensorFlow Lite model bundled in `app/src/main/assets/model.tflite` is produced by the **ML pipeline repo**: `<TODO: paste ML repo URL>`. That repo also outputs `deploy_config.json` (input scaler stats + tuned threshold), which `TFLiteRunner` reads at runtime so the model and the app stay in sync across retrains.
+The TensorFlow Lite model bundled in `app/src/main/assets/model.tflite` is produced by the **ML pipeline repo**: [Elderly-Fall-Detection](https://github.com/rhmt80/Elderly-Fall-Detection). That repo also outputs `deploy_config.json` (input scaler stats + tuned threshold), which `TFLiteRunner` reads at runtime so the model and the app stay in sync across retrains.
 
 ## Download
 
