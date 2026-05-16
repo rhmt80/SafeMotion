@@ -1,0 +1,63 @@
+<resources>
+    <string name="app_name">SafeMotion</string>
+
+    <string name="title_dashboard">SafeMotion</string>
+    <string name="subtitle_dashboard">On-device fall detection &amp; instant alerts</string>
+
+    <string name="status_idle">Idle</string>
+    <string name="status_running_constant">Constant mode</string>
+    <string name="status_running_adaptive">Adaptive mode</string>
+
+    <string name="card_profile">Emergency profile</string>
+    <string name="card_profile_subtitle">Who we monitor and who we alert</string>
+    <string name="card_monitoring">Monitoring</string>
+    <string name="card_monitoring_subtitle">Continuous sensor + ML pipeline</string>
+
+    <string name="adaptive_label">Battery-saver (adaptive sampling)</string>
+    <string name="adaptive_help">Sensors stay at low rate until significant motion is detected.</string>
+
+    <string name="action_start">Start monitoring</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_test">Send test alert</string>
+    <string name="action_edit">Edit details</string>
+
+    <string name="profile_unconfigured">Profile not yet configured.</string>
+
+    <string name="alert_title">Possible fall detected</string>
+    <string name="alert_subtitle">Sending SMS alert to your caretaker shortly. Tap cancel if you\'re ok.</string>
+    <string name="alert_cancel">I\'m okay — cancel</string>
+
+    <string name="setup_title">Set up SafeMotion</string>
+    <string name="setup_subtitle">We\'ll send a fall alert by SMS to your caretaker with your location.</string>
+    <string name="setup_section_user">Your details</string>
+    <string name="setup_section_caretaker">Caretaker details</string>
+    <string name="hint_user_name">Your name</string>
+    <string name="hint_user_phone">Your 10-digit number</string>
+    <string name="hint_caretaker_name">Caretaker name</string>
+    <string name="hint_caretaker_phone">Caretaker 10-digit number</string>
+    <string name="prefix_country">+91</string>
+    <string name="action_save">Save and continue</string>
+
+    <!-- Legal disclaimer shown before saving setup the first time -->
+    <string name="disclaimer_title">Important — please read</string>
+    <string name="disclaimer_body"><![CDATA[
+        <b>SafeMotion is not a medical device.</b><br/><br/>
+        It is a best-effort assistive tool. It will sometimes <b>fail to detect a real fall</b>, and it will sometimes <b>raise a false alert</b> when no fall has occurred.<br/><br/>
+        Do not rely on SafeMotion as your sole means of emergency response. Always have a backup plan: a wearable medical alert, a neighbour you can call, or 112 / your local emergency number.<br/><br/>
+        By tapping <b>I understand</b> you acknowledge:<br/>
+        • The app uses your phone\'s accelerometer, gyroscope, and last-known location.<br/>
+        • When a fall is detected, an SMS containing your name and a Google Maps link will be sent to the caretaker number you configured.<br/>
+        • Standard SMS charges from your carrier may apply.<br/>
+        • All sensor data stays on your phone — see the privacy policy for details.
+    ]]></string>
+    <string name="disclaimer_accept">I understand</string>
+    <string name="disclaimer_decline">Cancel</string>
+    <string name="disclaimer_privacy_link">Privacy policy</string>
+    <string name="privacy_policy_url" translatable="false">https://&lt;TODO-paste-your-github-pages-url&gt;/PRIVACY_POLICY.html</string>
+
+    <!-- Battery-optimization opt-out prompt -->
+    <string name="battery_opt_title">Keep monitoring running</string>
+    <string name="battery_opt_body">Android tries to save battery by closing background apps after a while. To make sure SafeMotion can detect a fall even hours after you start it, please allow it to run unrestricted.\n\nWe\'ll take you to the system setting now.</string>
+    <string name="battery_opt_open">Allow</string>
+    <string name="battery_opt_skip">Not now</string>
+</resources>

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- SafeMotion brand: deep teal primary, warm amber for alerts -->
+    <color name="brand_primary">#0E7C7B</color>
+    <color name="brand_primary_dark">#0A5C5B</color>
+    <color name="brand_primary_light">#E0F2F1</color>
+    <color name="brand_accent">#F4A261</color>
+
+    <color name="status_active">#16A34A</color>
+    <color name="status_active_bg">#DCFCE7</color>
+    <color name="status_idle">#64748B</color>
+    <color name="status_idle_bg">#E2E8F0</color>
+    <color name="status_alert">#DC2626</color>
+    <color name="status_alert_bg">#FEE2E2</color>
+
+    <color name="surface">#FFFFFF</color>
+    <color name="surface_subtle">#F7F8FA</color>
+    <color name="border">#E5E7EB</color>
+
+    <color name="text_primary">#0F172A</color>
+    <color name="text_secondary">#475569</color>
+    <color name="text_tertiary">#94A3B8</color>
+
+    <!-- legacy palette retained for any references -->
+    <color name="purple_200">#FFBB86FC</color>
+    <color name="purple_500">#FF6200EE</color>
+    <color name="purple_700">#FF3700B3</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
